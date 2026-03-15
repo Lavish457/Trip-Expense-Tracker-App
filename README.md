@@ -8,5 +8,5 @@ This application simplifies splitting bills among group members, promotes financ
 
 Member Name : Lavish Khatri
 
-Deployment Link : https://mega.nz/file/jUkFWLqK#7r2AHgTXMwMggQDxI1k7MBsmMVds-xbDqjTyehwAy5A
+Deployment Link : https://mega.nz/file/SR9iVJTY#O7UGOkBUF5zgFt8W9ro--AkHY5Z4mj2DVAWEALYtzt8
 
