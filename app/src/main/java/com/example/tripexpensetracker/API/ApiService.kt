@@ -76,18 +76,18 @@ interface ApiService {
 
     // settle balance api
     @GET("b/{bin_id}/latest")
-    suspend fun getSettleBalance(
-        @Path("bin_id") binId: String = "691c6c2643b1c97be9b51ab3",
+    suspend fun getTempUser(
+            @Path("bin_id") binId: String = "691c6c2643b1c97be9b51ab3",
         @Header("X-Master-Key") apiKey: String
-    ) : SettleListResponse
+    ) : UserListResponse
 
     @PUT("b/{bin_id}")
-    suspend fun updateSettleBalance(
+    suspend fun updateTempUser(
         @Path("bin_id") binId: String = "691c6c2643b1c97be9b51ab3",
         @Header("X-Master-Key") apiKey: String,
         @Header("Content-Type") contentType: String = "application/json",
-        @Body wrapper: SettleListWrapper
-    ) : SettleListResponse
+        @Body wrapper: UserListWrapper
+    ) : UserListResponse
 }
 
 //{

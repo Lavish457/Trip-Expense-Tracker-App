@@ -1,5 +1,6 @@
 package com.example.expensetrackerapp.Fragement
 
+import android.content.Context.MODE_PRIVATE
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
@@ -12,9 +13,11 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.expensetrackerapp.Adapter.BalanceAdapter
+import com.example.expensetrackerapp.KT_DataClass.Balance
 import com.example.tripexpensetracker.R
 import com.example.expensetrackerapp.RetrofitClient
 import com.example.tripexpensetracker.TripBalanceViewModel
+import com.google.firebase.database.*
 import kotlinx.coroutines.*
 
 class BalanceFragement : Fragment() {
@@ -27,10 +30,10 @@ class BalanceFragement : Fragment() {
     private var tripID: Long = 0L
     private lateinit var userList: RecyclerView
 
-    // ────────────────────────────────────────────────
-    // ADDED: Observe the shared ViewModel from Activity
-    // ────────────────────────────────────────────────
     private val viewModel: TripBalanceViewModel by activityViewModels()
+
+    // Flag to know if current user is test account
+    private var isTestUser: Boolean = false
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -42,20 +45,23 @@ class BalanceFragement : Fragment() {
 
         tripID = arguments?.getLong("ID") ?: 0L
 
+        // Check if current user is test account
+        val prefs = requireContext().getSharedPreferences("auth", MODE_PRIVATE)
+        isTestUser = prefs.getBoolean("isTempUser", false)
+        Log.d("BalanceFragment", "tripID: $tripID | isTestUser: $isTestUser")
+
         if (tripID == 0L) {
             Toast.makeText(requireContext(), "Trip ID missing", Toast.LENGTH_SHORT).show()
         } else {
-            // Initial load
-            fetchUsers(tripID)
+            // Load data – from Firebase if test user, else from API
+            loadBalances(tripID)
 
-            // ────────────────────────────────────────────────
-            // ADDED: Observe live updates from ViewModel
-            // ────────────────────────────────────────────────
+            // Observe ViewModel updates (still works for both cases)
             viewModel.balances.observe(viewLifecycleOwner) { updatedBalances ->
                 val filtered = updatedBalances.filter { it.tripId == tripID }
                 (userList.adapter as? BalanceAdapter)?.submitList(filtered)
 
-                if (filtered.isEmpty()) {
+                if (filtered.isEmpty() && !isTestUser) {
                     Toast.makeText(requireContext(), "No members yet", Toast.LENGTH_SHORT).show()
                 }
             }
@@ -64,7 +70,62 @@ class BalanceFragement : Fragment() {
         return view
     }
 
-    private fun fetchUsers(tripId: Long) {
+    private fun loadBalances(tripId: Long) {
+        if (isTestUser) {
+            fetchBalancesFromFirebase(tripId)
+        } else {
+            fetchBalancesFromApi(tripId)
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Fetch balances from Firebase Realtime Database for test users
+    // ───────────────────────────────────────────────────────────────
+    private fun fetchBalancesFromFirebase(tripId: Long) {
+        val database = FirebaseDatabase.getInstance()
+        val balanceRef = database.getReference("userBalance").child(tripId.toString())
+
+        balanceRef.addListenerForSingleValueEvent(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val balances = mutableListOf<Balance>()
+
+                for (child in snapshot.children) {
+                    val balance = child.getValue(Balance::class.java)
+                    if (balance != null) {
+                        balances.add(balance)
+                    }
+                }
+
+                lifecycleScope.launch(Dispatchers.Main) {
+                    if (!isAdded) return@launch
+
+                    val adapter = BalanceAdapter()
+                    adapter.submitList(balances)
+                    userList.adapter = adapter
+
+                    // Push to ViewModel for consistency
+                    viewModel.setBalancesManually(balances)
+
+                    if (balances.isEmpty()) {
+                        Toast.makeText(requireContext(), "No shared balances yet", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                lifecycleScope.launch(Dispatchers.Main) {
+                    if (!isAdded) return@launch
+                    Toast.makeText(requireContext(), "Failed to load shared balances", Toast.LENGTH_LONG).show()
+                }
+                Log.e("BalanceFragment", "Firebase error", error.toException())
+            }
+        })
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Original API fetch (used only for normal users)
+    // ───────────────────────────────────────────────────────────────
+    private fun fetchBalancesFromApi(tripId: Long) {
         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val response = RetrofitClient.instance.getBalance(Users_BIN_ID, API_KEY)
@@ -74,18 +135,21 @@ class BalanceFragement : Fragment() {
                 withContext(Dispatchers.Main) {
                     if (!isAdded) return@withContext
 
-                    var adapter = BalanceAdapter()
+                    val adapter = BalanceAdapter()
                     adapter.submitList(filteredUsers)
                     userList.adapter = adapter
 
-                    // Optional: also push to ViewModel so it's in sync
+                    // Also push to ViewModel
                     viewModel.setBalancesManually(filteredUsers)
+
+                    if (filteredUsers.isEmpty()) {
+                        Toast.makeText(requireContext(), "No members yet", Toast.LENGTH_SHORT).show()
+                    }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     if (!isAdded) return@withContext
-                    // Toast.makeText(requireContext(), "Error loading balances: ${e.message}", Toast.LENGTH_LONG).show()
-                    Log.d("Error", "Error : ${e.message}")
+                    Log.e("BalanceFragment", "API error", e)
                 }
             }
         }

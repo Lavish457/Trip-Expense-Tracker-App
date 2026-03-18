@@ -29,6 +29,10 @@ import com.example.tripexpensetracker.R
 import com.example.expensetrackerapp.RetrofitClient
 import com.example.tripexpensetracker.TripBalanceViewModel
 import com.google.android.material.card.MaterialCardView
+import com.google.firebase.database.DataSnapshot
+import com.google.firebase.database.DatabaseError
+import com.google.firebase.database.FirebaseDatabase
+import com.google.firebase.database.ValueEventListener
 import kotlinx.coroutines.*
 
 class TripDetail : AppCompatActivity() {
@@ -51,14 +55,14 @@ class TripDetail : AppCompatActivity() {
     private lateinit var tabSettle: MaterialCardView
     private var payeeList = ArrayList<String>()
     private var tripID: Long = 0
-    private var createrId : Long = -1
+    private var createrId: Long = -1
 
-    // ────────────────────────────────────────────────
-    // ADDED: ViewModel to refresh balances across fragments
-    // ────────────────────────────────────────────────
     private val balanceViewModel: TripBalanceViewModel by lazy {
         ViewModelProvider(this)[TripBalanceViewModel::class.java]
     }
+
+    // Flag to know if current user is test account
+    private var isTestUser: Boolean = false
 
     @SuppressLint("MissingInflatedId")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -66,9 +70,20 @@ class TripDetail : AppCompatActivity() {
         enableEdgeToEdge()
         setContentView(R.layout.activity_trip_detail)
         hideNavigationBar()
-        val prefs = getSharedPreferences("memberId", MODE_PRIVATE)
-        createrId = prefs.getLong("memberId", -1)
-        Log.d("IID1", createrId.toString())
+
+        // ────────────────────────────────────────────────────────────────────
+        // FIX: isTestUser must be read from the "auth" prefs (where SignIn
+        //      saves it), NOT from "memberId" prefs which only stores the
+        //      numeric member ID.
+        // ────────────────────────────────────────────────────────────────────
+        val authPrefs = getSharedPreferences("auth", MODE_PRIVATE)
+        isTestUser = authPrefs.getBoolean("isTempUser", false)
+
+        val memberPrefs = getSharedPreferences("memberId", MODE_PRIVATE)
+        createrId = memberPrefs.getLong("memberId", -1L)
+
+        Log.d("TripDetail", "createrId=$createrId | isTestUser=$isTestUser")
+
         tripID = intent.getLongExtra("tripId", 0L)
         Log.d("TripDetail", "Trip ID: $tripID")
 
@@ -80,10 +95,9 @@ class TripDetail : AppCompatActivity() {
 
         fetchTrip(tripID)
 
-        val generateBill : LinearLayout = findViewById(R.id.generateBill)
-        generateBill.setOnClickListener()
-        {
-            var intent = Intent(this,BillDetail::class.java)
+        val generateBill: LinearLayout = findViewById(R.id.generateBill)
+        generateBill.setOnClickListener {
+            val intent = Intent(this, BillDetail::class.java)
             intent.putExtra("TripID", tripID)
             startActivity(intent)
         }
@@ -104,11 +118,34 @@ class TripDetail : AppCompatActivity() {
     }
 
     private fun setupClickListeners() {
-        tabBalances.setOnClickListener { replaceFragment(BalanceFragement.newInstance(tripID)); highlightTab(tabBalances) }
-        tabExpenses.setOnClickListener { replaceFragment(ExpensesFragement.newInstance(tripID)); highlightTab(tabExpenses) }
-        tabSettle.setOnClickListener { replaceFragment(SettleFragement.newInstance(tripID)); highlightTab(tabSettle) }
-        addNewExpense.setOnClickListener { showAddExpenseDialog() }
-        addNewMember.setOnClickListener { showAddMemberDialog() }
+        tabBalances.setOnClickListener {
+            replaceFragment(BalanceFragement.newInstance(tripID))
+            highlightTab(tabBalances)
+        }
+        tabExpenses.setOnClickListener {
+            replaceFragment(ExpensesFragement.newInstance(tripID))
+            highlightTab(tabExpenses)
+        }
+        tabSettle.setOnClickListener {
+            replaceFragment(SettleFragement.newInstance(tripID))
+            highlightTab(tabSettle)
+        }
+
+        addNewExpense.setOnClickListener {
+            if (isTestUser) {
+                Toast.makeText(this, "You are using a test account. Cannot update data.", Toast.LENGTH_LONG).show()
+            } else {
+                showAddExpenseDialog()
+            }
+        }
+
+        addNewMember.setOnClickListener {
+            if (isTestUser) {
+                Toast.makeText(this, "You are using a test account. Cannot update data.", Toast.LENGTH_LONG).show()
+            } else {
+                showAddMemberDialog()
+            }
+        }
     }
 
     private suspend fun incrementMemberCount(tripId: Long) {
@@ -175,7 +212,6 @@ class TripDetail : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            // Show progress dialog
             val progressDialog = showProgressDialog("Adding member...")
 
             CoroutineScope(Dispatchers.IO).launch {
@@ -187,7 +223,11 @@ class TripDetail : AppCompatActivity() {
 
                     list.add(Balance(name, System.currentTimeMillis(), 0, 0, 0, tripID, createrId))
 
-                    RetrofitClient.instance.updateBalance(Users_BIN_ID, API_KEY, wrapper = BalanceListWrapper(list))
+                    RetrofitClient.instance.updateBalance(
+                        Users_BIN_ID,
+                        API_KEY,
+                        wrapper = BalanceListWrapper(list)
+                    )
 
                     incrementMemberCount(tripID)
 
@@ -242,7 +282,9 @@ class TripDetail : AppCompatActivity() {
             val amountStr = edtAmount.text.toString().trim()
             val paidByName = paidByUser.selectedItem?.toString() ?: ""
 
-            if (expenseName.isEmpty() || amountStr.isEmpty() || paidByName.isEmpty() || paidByName == "No members yet") {
+            if (expenseName.isEmpty() || amountStr.isEmpty() ||
+                paidByName.isEmpty() || paidByName == "No members yet"
+            ) {
                 Toast.makeText(this, "Please fill all fields", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
@@ -252,7 +294,6 @@ class TripDetail : AppCompatActivity() {
                 return@setOnClickListener
             }
 
-            // Show progress dialog
             val progressDialog = showProgressDialog("Adding expense...")
 
             CoroutineScope(Dispatchers.IO).launch {
@@ -271,7 +312,11 @@ class TripDetail : AppCompatActivity() {
 
                         withContext(Dispatchers.Main) {
                             progressDialog.dismiss()
-                            Toast.makeText(this@TripDetail, "Add at least one member first!", Toast.LENGTH_LONG).show()
+                            Toast.makeText(
+                                this@TripDetail,
+                                "Add at least one member first!",
+                                Toast.LENGTH_LONG
+                            ).show()
                         }
                         return@launch
                     }
@@ -300,15 +345,21 @@ class TripDetail : AppCompatActivity() {
                     )
 
                     expenseList.add(newExpense)
-                    RetrofitClient.instance.updateExpense(Expense_BIN_ID, API_KEY, wrapper = ExpenseListWrapper(expenseList))
+                    RetrofitClient.instance.updateExpense(
+                        Expense_BIN_ID,
+                        API_KEY,
+                        wrapper = ExpenseListWrapper(expenseList)
+                    )
 
                     val balanceResponse = RetrofitClient.instance.getBalance(Users_BIN_ID, API_KEY)
-                    val currentBalances = (balanceResponse.record.userBalance ?: mutableListOf()).toMutableList()
+                    val currentBalances =
+                        (balanceResponse.record.userBalance ?: mutableListOf()).toMutableList()
                     val balanceMap = currentBalances.associateBy { it.memberId }.toMutableMap()
 
                     membersWithInfo.forEach { member ->
                         if (!balanceMap.containsKey(member.id)) {
-                            balanceMap[member.id] = Balance(member.name, member.id, 0, 0, 0, tripID, createrId)
+                            balanceMap[member.id] =
+                                Balance(member.name, member.id, 0, 0, 0, tripID, createrId)
                         }
                     }
 
@@ -322,7 +373,11 @@ class TripDetail : AppCompatActivity() {
                     }
                     payerBalance.balance = payerBalance.paidAmount - payerBalance.creditAmount
 
-                    RetrofitClient.instance.updateBalance(Users_BIN_ID, API_KEY, wrapper = BalanceListWrapper(balanceMap.values.toMutableList()))
+                    RetrofitClient.instance.updateBalance(
+                        Users_BIN_ID,
+                        API_KEY,
+                        wrapper = BalanceListWrapper(balanceMap.values.toMutableList())
+                    )
 
                     incrementExpenseCountAndAmount(tripID, amount)
 
@@ -331,7 +386,11 @@ class TripDetail : AppCompatActivity() {
 
                     withContext(Dispatchers.Main) {
                         progressDialog.dismiss()
-                        Toast.makeText(this@TripDetail, "Expense added & balances updated!", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            this@TripDetail,
+                            "Expense added & balances updated!",
+                            Toast.LENGTH_LONG
+                        ).show()
                         dialog.dismiss()
                         fetchTrip(tripID)
                         balanceViewModel.refreshBalances(tripID, createrId)
@@ -350,7 +409,6 @@ class TripDetail : AppCompatActivity() {
         }
         dialog.show()
     }
-
 
     private fun showProgressDialog(message: String = "Please wait..."): AlertDialog {
         val container = LinearLayout(this).apply {
@@ -385,19 +443,21 @@ class TripDetail : AppCompatActivity() {
             .create()
             .apply { show() }
     }
+
     data class MemberInfo(val id: Long, val name: String)
 
-    private suspend fun getMembersWithNameAndId(tripId: Long): List<MemberInfo> = withContext(Dispatchers.IO) {
-        try {
-            val response = RetrofitClient.instance.getBalance(Users_BIN_ID, API_KEY)
-            response.record.userBalance
-                ?.filter { it.tripId == tripId }
-                ?.map { MemberInfo(it.memberId, it.memberName) }
-                ?: emptyList()
-        } catch (e: Exception) {
-            emptyList()
+    private suspend fun getMembersWithNameAndId(tripId: Long): List<MemberInfo> =
+        withContext(Dispatchers.IO) {
+            try {
+                val response = RetrofitClient.instance.getBalance(Users_BIN_ID, API_KEY)
+                response.record.userBalance
+                    ?.filter { it.tripId == tripId }
+                    ?.map { MemberInfo(it.memberId, it.memberName) }
+                    ?: emptyList()
+            } catch (e: Exception) {
+                emptyList()
+            }
         }
-    }
 
     private fun loadPayeesAndSetupSpinner(spinner: Spinner) {
         payeeList.clear()
@@ -405,7 +465,8 @@ class TripDetail : AppCompatActivity() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val response = RetrofitClient.instance.getBalance(Users_BIN_ID, API_KEY)
-                val users = response.record.userBalance?.filter { it.tripId == tripID } ?: emptyList()
+                val users =
+                    response.record.userBalance?.filter { it.tripId == tripID } ?: emptyList()
 
                 withContext(Dispatchers.Main) {
                     if (users.isEmpty()) {
@@ -415,22 +476,74 @@ class TripDetail : AppCompatActivity() {
                         payeeList.addAll(users.map { it.memberName })
                         spinner.isEnabled = true
                     }
-                    spinner.adapter = ArrayAdapter(this@TripDetail, android.R.layout.simple_list_item_1, payeeList)
+                    spinner.adapter = ArrayAdapter(
+                        this@TripDetail,
+                        android.R.layout.simple_list_item_1,
+                        payeeList
+                    )
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     payeeList.add("Failed to load")
-                    spinner.adapter = ArrayAdapter(this@TripDetail, android.R.layout.simple_list_item_1, payeeList)
+                    spinner.adapter = ArrayAdapter(
+                        this@TripDetail,
+                        android.R.layout.simple_list_item_1,
+                        payeeList
+                    )
                 }
             }
         }
     }
 
-    fun fetchTrip(ID: Long) {
+    private fun fetchTrip(tripId: Long) {
+        if (isTestUser) {
+            fetchTripFromFirebase(tripId)
+        } else {
+            fetchTripFromApi(tripId)
+        }
+    }
+
+    private fun fetchTripFromFirebase(tripId: Long) {
+        val database = FirebaseDatabase.getInstance()
+        val tripRef = database.getReference("tripData").child(tripId.toString())
+
+        tripRef.addListenerForSingleValueEvent(object : ValueEventListener {
+            override fun onDataChange(snapshot: DataSnapshot) {
+                val trip = snapshot.getValue(Trips::class.java)
+                runOnUiThread {
+                    if (trip != null) {
+                        tripName.text = trip.tripName.ifEmpty { "Unnamed Trip" }
+                        expenseAmount.text = "₹ ${trip.totalAmount}"
+                        expenseCount.text = "${trip.expenseCount} expenses"
+                        memberCount.text = "${trip.totalMembers} members"
+                    } else {
+                        Toast.makeText(
+                            this@TripDetail,
+                            "Trip not found in shared data",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+
+            override fun onCancelled(error: DatabaseError) {
+                runOnUiThread {
+                    Toast.makeText(
+                        this@TripDetail,
+                        "Failed to load shared trip: ${error.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                Log.e("TripDetail", "Firebase fetch error", error.toException())
+            }
+        })
+    }
+
+    private fun fetchTripFromApi(tripId: Long) {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val response = RetrofitClient.instance.getTrips(Trips_BIN_ID, API_KEY)
-                val trip = response.record.trips.find { it.tripID == ID }
+                val trip = response.record.trips.find { it.tripID == tripId }
                 withContext(Dispatchers.Main) {
                     if (trip != null) {
                         tripName.text = trip.tripName

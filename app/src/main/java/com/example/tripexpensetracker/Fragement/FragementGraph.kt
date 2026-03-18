@@ -9,9 +9,9 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
-import android.widget.Toast
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.lifecycleScope   // ← Add this import
+import androidx.lifecycle.lifecycleScope
+import com.example.expensetrackerapp.KT_DataClass.Trips
 import com.example.tripexpensetracker.R
 import com.example.expensetrackerapp.RetrofitClient
 import com.github.mikephil.charting.charts.BarChart
@@ -20,9 +20,9 @@ import com.github.mikephil.charting.data.BarData
 import com.github.mikephil.charting.data.BarDataSet
 import com.github.mikephil.charting.data.BarEntry
 import com.github.mikephil.charting.formatter.IndexAxisValueFormatter
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.google.firebase.database.*
+import kotlinx.coroutines.*
+import kotlinx.coroutines.tasks.await
 
 class FragementGraph : Fragment() {
 
@@ -35,6 +35,9 @@ class FragementGraph : Fragment() {
     private lateinit var totalSpent: TextView
     private lateinit var totalAvg: TextView
 
+    // Flag to know if current user is test account
+    private var isTestUser: Boolean = false
+
     @SuppressLint("MissingInflatedId")
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -42,43 +45,51 @@ class FragementGraph : Fragment() {
     ): View? {
         val view = inflater.inflate(R.layout.fragment_fragement_graph, container, false)
 
+        // Check if current user is test account
+        val prefs = requireActivity().getSharedPreferences("auth", Context.MODE_PRIVATE)
+        isTestUser = prefs.getBoolean("isTempUser", false)
+
         createrId = requireActivity()
             .getSharedPreferences("memberId", Context.MODE_PRIVATE)
             .getLong("memberId", -1L)
 
-        totalSpent = view.findViewById(R.id.spentTotal)   // note: id was spentTotal, not spentAvg
+        Log.d("GraphFragment", "createrId: $createrId | isTestUser: $isTestUser")
+
+        totalSpent = view.findViewById(R.id.spentTotal)
         totalAvg   = view.findViewById(R.id.spentAvg)
 
         // Use viewLifecycleOwner.lifecycleScope – automatically cancels on onDestroyView()
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val response = RetrofitClient.instance.getTrips(Trips_BIN_ID, API_KEY)
-                val tripList = response.record.trips.toMutableList()
-                val filtered = tripList.filter { it.memberID == createrId }
+                val filteredTrips = if (isTestUser) {
+                    fetchTripsFromFirebase()
+                } else {
+                    fetchTripsFromApi()
+                }
 
-                val totalSum = filtered.sumOf { it.totalAmount }
-                val userTripCount = filtered.size.toDouble()   // ← use filtered.size, not tripList.size!
-
-                // Switch to main only once for all UI updates
                 withContext(Dispatchers.Main) {
+                    if (!isAdded) return@withContext
+
+                    val totalSum = filteredTrips.sumOf { it.totalAmount }
+                    val userTripCount = filteredTrips.size.toDouble()
+
                     totalSpent.text = totalSum.toString()
                     totalAvg.text = if (userTripCount > 0) {
-                        "%.2f".format(totalSum / userTripCount)   // better formatting
+                        "%.2f".format(totalSum / userTripCount)
                     } else "0"
 
                     Log.d("SUM", "Total: $totalSum | Avg: ${totalAvg.text}")
 
                     val barChart = view.findViewById<BarChart>(R.id.barChart)
 
-                    if (filtered.isEmpty()) {
-                        // Optional: show "No trips" message or empty chart
+                    if (filteredTrips.isEmpty()) {
                         barChart.setNoDataText("No trips created yet")
                         barChart.invalidate()
                         return@withContext
                     }
 
-                    val labels = filtered.map { it.tripName }
-                    val entries = filtered.mapIndexed { index, trip ->
+                    val labels = filteredTrips.map { it.tripName }
+                    val entries = filteredTrips.mapIndexed { index, trip ->
                         BarEntry(index.toFloat(), trip.totalAmount.toFloat())
                     }
 
@@ -112,16 +123,53 @@ class FragementGraph : Fragment() {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
-                    // Safe now – coroutine is cancelled if view is gone
-                    if (isAdded) {  // extra safety check (good habit)
-                        Log.d("Error", "Error: ${e.message}")
-//                        Toast.makeText(requireContext(), "Error loading data: ${e.message}", Toast.LENGTH_LONG).show()
+                    if (isAdded) {
+                        Log.e("GraphFragment", "Failed to load trips", e)
+                        // Toast.makeText(requireContext(), "Error loading data", Toast.LENGTH_LONG).show()
                     }
                 }
-                Log.e("GraphFragment", "Failed to load trips", e)
             }
         }
 
         return view
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Fetch trips from Firebase Realtime Database (for test users)
+    // ───────────────────────────────────────────────────────────────
+    private suspend fun fetchTripsFromFirebase(): List<Trips> = withContext(Dispatchers.IO) {
+        try {
+            val database = FirebaseDatabase.getInstance()
+            val tripsRef = database.getReference("tripData")
+
+            val snapshot = tripsRef.get().await()
+
+            val trips = mutableListOf<Trips>()
+
+            for (child in snapshot.children) {
+                val trip = child.getValue(Trips::class.java)
+                if (trip != null && trip.memberID == createrId) {
+                    trips.add(trip)
+                }
+            }
+
+            trips
+        } catch (e: Exception) {
+            Log.e("GraphFragment", "Firebase fetch error", e)
+            emptyList()
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Original API fetch (used only for normal users)
+    // ───────────────────────────────────────────────────────────────
+    private suspend fun fetchTripsFromApi(): List<Trips> = withContext(Dispatchers.IO) {
+        try {
+            val response = RetrofitClient.instance.getTrips(Trips_BIN_ID, API_KEY)
+            response.record.trips.filter { it.memberID == createrId }
+        } catch (e: Exception) {
+            Log.e("GraphFragment", "API fetch error", e)
+            emptyList()
+        }
     }
 }

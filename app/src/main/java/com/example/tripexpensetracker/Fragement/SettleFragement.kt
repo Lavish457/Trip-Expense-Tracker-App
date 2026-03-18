@@ -1,5 +1,7 @@
 package com.example.expensetrackerapp.Fragement
 
+import android.annotation.SuppressLint
+import android.content.Context.MODE_PRIVATE
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
@@ -13,7 +15,9 @@ import com.example.expensetrackerapp.Adapter.SettleAdapter
 import com.example.expensetrackerapp.KT_DataClass.Balance
 import com.example.expensetrackerapp.RetrofitClient
 import com.example.tripexpensetracker.databinding.FragmentSettleFragementBinding
-import kotlinx.coroutines.launch
+import com.google.firebase.database.*
+import kotlinx.coroutines.*
+import kotlinx.coroutines.tasks.await
 
 class SettleFragement : Fragment() {
 
@@ -27,6 +31,9 @@ class SettleFragement : Fragment() {
 
     private var tripId: Long = 0L
     private lateinit var adapter: SettleAdapter
+
+    // Flag to know if current user is test account
+    private var isTestUser: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +50,11 @@ class SettleFragement : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+
+        // Check if current user is test account
+        val prefs = requireContext().getSharedPreferences("auth", MODE_PRIVATE)
+        isTestUser = prefs.getBoolean("isTempUser", false)
+        Log.d("SettleFragment", "tripId: $tripId | isTestUser: $isTestUser")
 
         setupRecyclerView()
 
@@ -63,18 +75,69 @@ class SettleFragement : Fragment() {
     }
 
     private fun fetchSettlements(tripId: Long) {
+        if (isTestUser) {
+            fetchSettlementsFromFirebase(tripId)
+        } else {
+            fetchSettlementsFromApi(tripId)
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Fetch settlements from Firebase Realtime Database (for test users)
+    // ───────────────────────────────────────────────────────────────
+    private fun fetchSettlementsFromFirebase(tripId: Long) {
+        viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val database = FirebaseDatabase.getInstance()
+                val balanceRef = database.getReference("userBalance").child(tripId.toString())
+
+                val snapshot = balanceRef.get().await()
+
+                val settlements = mutableListOf<Balance>()
+
+                for (child in snapshot.children) {
+                    val balance = child.getValue(Balance::class.java)
+                    if (balance != null && balance.balance != 0) {
+                        settlements.add(balance)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    if (!isAdded) return@withContext
+
+                    if (settlements.isEmpty()) {
+                        Toast.makeText(requireContext(), "No settlements for this trip (shared data)", Toast.LENGTH_LONG).show()
+                    }
+
+                    adapter.updateList(settlements)
+                }
+
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    if (!isAdded) return@withContext
+                    Log.e("SettleFragment", "Firebase fetch error", e)
+                    Toast.makeText(requireContext(), "Failed to load shared settlements", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // Original API fetch (used only for normal users)
+    // ───────────────────────────────────────────────────────────────
+    private fun fetchSettlementsFromApi(tripId: Long) {
         viewLifecycleOwner.lifecycleScope.launch {
             try {
                 val response = RetrofitClient.instance.getBalance(BIN_ID, API_KEY)
 
-                android.util.Log.d("SettleDebug", "Full Response: $response")
-                android.util.Log.d("SettleDebug", "userBalance field: ${response.record.userBalance}")
+                Log.d("SettleDebug", "Full Response: $response")
+                Log.d("SettleDebug", "userBalance field: ${response.record.userBalance}")
 
                 val allBalances = response.record.userBalance ?: emptyList()
-                android.util.Log.d("SettleDebug", "Total items: ${allBalances.size}")
+                Log.d("SettleDebug", "Total items: ${allBalances.size}")
 
                 val filtered = allBalances.filter { it.tripId == tripId && it.balance != 0 }
-                android.util.Log.d("SettleDebug", "Filtered for trip $tripId: ${filtered.size} items")
+                Log.d("SettleDebug", "Filtered for trip $tripId: ${filtered.size} items")
 
                 if (filtered.isEmpty()) {
                     Toast.makeText(requireContext(), "No data for tripId: $tripId", Toast.LENGTH_LONG).show()
@@ -84,8 +147,8 @@ class SettleFragement : Fragment() {
 
             } catch (e: Exception) {
                 e.printStackTrace()
-                Log.d("Error","Error : ${e.message}")
-//                Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show()
+                Log.d("Error", "Error: ${e.message}")
+                // Toast.makeText(requireContext(), "Error: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }

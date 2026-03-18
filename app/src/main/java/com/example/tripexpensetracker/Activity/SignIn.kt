@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.EditText
@@ -17,14 +18,15 @@ import androidx.appcompat.widget.AppCompatButton
 import com.example.tripexpensetracker.R
 import com.example.expensetrackerapp.RetrofitClient
 import kotlinx.coroutines.*
-import kotlin.random.Random
 
 class SignIn : AppCompatActivity() {
 
     private val API_KEY1 = "\$2a\$10$"
     private val API_KEY2 = "hPDzuJOstFCGQJp/WyXF/OCUkVjzUbrXHE1W6CMVm4jMb.MXdAz92"
     private val API_KEY = API_KEY1 + API_KEY2
-    private val BIN_ID = "69171b69d0ea881f40e7f4cd"
+
+    private val NORMAL_BIN_ID = "69171b69d0ea881f40e7f4cd"
+    private val TEMP_BIN_ID = "691c6c2643b1c97be9b51ab3"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,6 +42,7 @@ class SignIn : AppCompatActivity() {
         findViewById<TextView>(R.id.txtSignUp).setOnClickListener {
             startActivity(Intent(this, SignUp::class.java))
         }
+
         findViewById<AppCompatButton>(R.id.btn).setOnClickListener {
             val email = findViewById<EditText>(R.id.edtEmailSignIn).text.toString().trim()
             val password = findViewById<EditText>(R.id.edtPasswordSignIn).text.toString().trim()
@@ -52,6 +55,7 @@ class SignIn : AppCompatActivity() {
             loginUser(email, password)
         }
     }
+
     fun Context.showLoadingDialog(message: String = "Please wait..."): AlertDialog {
         val ll = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -65,9 +69,7 @@ class SignIn : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                marginEnd = 32 // space between spinner and text
-            }
+            ).apply { marginEnd = 32 }
         }
 
         val tv = TextView(this).apply {
@@ -80,7 +82,7 @@ class SignIn : AppCompatActivity() {
         ll.addView(tv)
 
         return AlertDialog.Builder(this)
-            .setCancelable(false)           // user can't dismiss by touching outside / back
+            .setCancelable(false)
             .setView(ll)
             .create()
             .apply { show() }
@@ -90,33 +92,86 @@ class SignIn : AppCompatActivity() {
         val loadingDialog = showLoadingDialog("Logging in...")
 
         CoroutineScope(Dispatchers.IO).launch {
-            // Minimum display time = 2 seconds
             val startTime = System.currentTimeMillis()
 
             try {
-                val response = RetrofitClient.instance.getUsers(BIN_ID, API_KEY)
-                val user = response.record.users.find {
-                    it.email.equals(email, ignoreCase = true) && it.password == password
+                val isTestAccount = email.lowercase().contains("test")
+                Log.d("LoginDebug", "Email: $email → isTestAccount = $isTestAccount")
+
+                val binIdToUse = if (isTestAccount) TEMP_BIN_ID else NORMAL_BIN_ID
+                Log.d("LoginDebug", "Using bin ID: $binIdToUse")
+
+                val response = if (isTestAccount) {
+                    Log.d("LoginDebug", "Calling getTempUser()")
+                    RetrofitClient.instance.getTempUser(binIdToUse, API_KEY)
+                } else {
+                    Log.d("LoginDebug", "Calling getUsers()")
+                    RetrofitClient.instance.getUsers(binIdToUse, API_KEY)
+                }
+
+                val usersList = response.record.users
+                Log.d("LoginDebug", "Fetched ${usersList.size} users from bin")
+
+                usersList.forEachIndexed { index, user ->
+                    Log.d("LoginDebug", "User $index: ${user.email} / memberID: ${user.memberID}")
+                }
+
+                val user = usersList.find {
+                    val match = it.email.equals(email, ignoreCase = true) && it.password == password
+                    Log.d("LoginDebug", "Checking ${it.email} → match = $match")
+                    match
                 }
 
                 val elapsed = System.currentTimeMillis() - startTime
-                if (elapsed < 2000) {
-                    delay(2000 - elapsed)   // wait until at least 2 seconds passed
-                }
+                if (elapsed < 2000) delay(2000 - elapsed)
 
                 withContext(Dispatchers.Main) {
                     loadingDialog.dismiss()
 
                     if (user != null) {
+                        // ── Save basic login state ────────────────────────────────────
                         saveLoginState(email)
+
+                        // ── Save memberId so HomeFragment / fragments can filter data
+                        //    by the logged-in user.
+                        //    FIX: this was never saved for test accounts, causing
+                        //    memberId to stay -1 and HomeFragment to find 0 trips.
+                        // ─────────────────────────────────────────────────────────────
+                        getSharedPreferences("memberId", MODE_PRIVATE).edit()
+                            .putLong("memberId", user.memberID)
+                            .apply()
+                        Log.d("LoginDebug", "Saved memberId = ${user.memberID}")
+
+                        // ── Extra flags for test accounts ─────────────────────────────
+                        if (isTestAccount) {
+                            getSharedPreferences("auth", MODE_PRIVATE).edit().apply {
+                                putBoolean("isTempUser", true)
+                                putString("tempEmail", email)
+                                apply()
+                            }
+                            Log.d("LoginDebug", "Saved temp user flags → isTempUser=true, email=$email")
+                        } else {
+                            // Clear any stale temp-user flags from a previous test login
+                            getSharedPreferences("auth", MODE_PRIVATE).edit().apply {
+                                putBoolean("isTempUser", false)
+                                remove("tempEmail")
+                                apply()
+                            }
+                            Log.d("LoginDebug", "Normal user login → cleared temp user flags")
+                        }
+
                         Toast.makeText(this@SignIn, "Welcome back, ${user.name}!", Toast.LENGTH_LONG).show()
                         startActivity(Intent(this@SignIn, Home::class.java))
                         finish()
                     } else {
-                        Toast.makeText(this@SignIn, "Invalid email or password", Toast.LENGTH_SHORT).show()
+                        val msg = if (isTestAccount) "Invalid test email or password"
+                        else "Invalid email or password"
+                        Toast.makeText(this@SignIn, msg, Toast.LENGTH_SHORT).show()
+                        Log.w("LoginDebug", "No matching user found for email: $email")
                     }
                 }
             } catch (e: Exception) {
+                Log.e("LoginDebug", "Login failed", e)
                 val elapsed = System.currentTimeMillis() - startTime
                 if (elapsed < 2000) delay(2000 - elapsed)
 
